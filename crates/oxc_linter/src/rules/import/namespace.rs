@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use crate::{
     context::LintContext,
-    module_record::{ExportExportName, ExportImportName, ImportImportName, ModuleRecord},
+    module_record::{ExportExportName, ImportImportName, ModuleRecord},
     rule::{DefaultRuleConfig, Rule},
 };
 
@@ -241,32 +241,17 @@ impl Rule for Namespace {
 /// b is a namespace in b.js so the return value is Some("./c")
 ///
 fn get_module_request_name(name: &str, module_record: &ModuleRecord) -> Option<String> {
-    if let Some(entry) =
-        module_record.indirect_export_entries.iter().find(|e| match &e.import_name {
-            ExportImportName::All => {
-                if let ExportExportName::Name(name_span) = &e.export_name {
-                    return name_span.name() == name;
-                }
+    // A namespace object is only ever re-exported as `export * as name from "..."`, or as an
+    // indirect export normalized to that form when a namespace import is re-exported locally
+    // (`import * as ns from "..."; export { ns }`).
+    // `export { name } from "..."` re-exports a value, not a namespace object, so a local
+    // namespace import that happens to share the name must not be considered.
+    let entry = module_record.indirect_export_entries.iter().find(|e| {
+        e.import_name.is_all()
+            && matches!(&e.export_name, ExportExportName::Name(name_span) if name_span.name() == name)
+    })?;
 
-                false
-            }
-            ExportImportName::Name(name_span) => {
-                name_span.name() == name
-                    && module_record.import_entries.iter().any(|entry| {
-                        entry.local_name.name() == name && entry.import_name.is_namespace_object()
-                    })
-            }
-            _ => false,
-        })
-    {
-        return entry.module_request.as_ref().map(|name| name.name().to_string());
-    }
-
-    module_record
-        .import_entries
-        .iter()
-        .find(|entry| entry.local_name.name() == name && entry.import_name.is_namespace_object())
-        .map(|entry| entry.module_request.name().to_string())
+    entry.module_request.as_ref().map(|name| name.name().to_string())
 }
 
 fn check_deep_namespace_for_node(
@@ -507,6 +492,13 @@ fn test() {
         // https://github.com/oxc-project/oxc/issues/10318
         (
             r#"import * as lib from "./typescript-export-enum"; export const bar = lib.Foo.BAR;"#,
+            None,
+        ),
+        // https://github.com/oxc-project/oxc/issues/29844
+        // `export { Thing } from './Thing.js'` re-exports a value, not the local namespace import.
+        (r#"import { Thing } from "./issue-29844/index.js"; console.log(Thing.hello())"#, None),
+        (
+            r#"import { Thing } from "./issue-29844/reexport-other.js"; console.log(Thing.bye())"#,
             None,
         ),
     ];
